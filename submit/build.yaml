@@ -1,1 +1,243 @@
 # cloudformation solution goes here
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DS5220 Data Project 1 - CloudFormation Template 
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 key pair for SSH access to the instances
+
+  MyIp:
+    Type: String
+    Description: Your (current) public IP in CIDR form w/ example (1.2.3.4/32)
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch into
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: The Public Subnet where the EC2 instance will launch
+
+  RepoUrl:
+    Type: String
+    Description: URL of your forked anomaly-detection repo
+    Default: https://github.com/jeffreyzhang10/anomaly-detection.git
+
+  UvaId:
+    Description: Your UVA computing ID
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+
+  LatestUbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+Resources:
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and FastAPI
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIp
+          Description: Lets me SSH from my IP only
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: FastAPI from anywhere
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: SnsTopicPolicy # REMOVE DEPENDENCY HERE 
+    Properties:
+      BucketName: !Sub ${UvaId}-ds5220-dp1-${AWS::AccountId}-${AWS::Region}
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Event: s3:ObjectCreated:*
+            Topic: !Ref SnsTopic
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/
+                  - Name: suffix
+                    Value: .csv
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: # need for EC2 to use IAM role 
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BucketOnlyAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${DataBucket.Arn}/*
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2Role
+
+  # SNS topic and subscription HERE 
+  SnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${UvaId}-ds5220-dp1
+
+  SnsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SnsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3Publish
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SnsTopic
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:s3:::${UvaId}-ds5220-dp1-${AWS::AccountId}-${AWS::Region}
+
+  AppInstance:
+    Type: AWS::EC2::Instance # EC2 instance HERE
+    Properties:
+      ImageId: !Ref LatestUbuntuAmi
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 16
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # exit if any command fails
+          set -euxo pipefail
+
+          apt-get update -y
+          apt-get install -y python3 python3-venv python3-pip git 
+
+          # CLONE HERE 
+          cd /home/ubuntu
+          git clone ${RepoUrl} app
+          chown -R ubuntu:ubuntu /home/ubuntu/app # checking ownership of files 
+
+          # create venv
+          cd /home/ubuntu/app   
+          sudo -u ubuntu python3 -m venv venv
+          sudo -u ubuntu /home/ubuntu/app/venv/bin/pip install --upgrade pip
+          sudo -u ubuntu /home/ubuntu/app/venv/bin/pip install -r requirements.txt
+
+          # setting bucket name HERE
+          export BUCKET_NAME=${DataBucket}
+          # Save BUCKET_NAME for future reference 
+          echo BUCKET_NAME=${DataBucket} >> /etc/environment
+
+          # final command start FastAPI using venv 
+          # sudo -u ubuntu /home/ubuntu/app/venv/bin/fastapi run app.py --host 0.0.0.0 --port 8000 &
+
+          cat > /etc/systemd/system/anomaly-api.service <<EOF
+          [Unit]
+          Description=FastAPI anomaly detection service
+          After=network.target
+
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/app
+          Environment=BUCKET_NAME=${DataBucket}
+          ExecStart=/home/ubuntu/app/venv/bin/fastapi run app.py --host 0.0.0.0 --port 8000
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable anomaly-api
+          systemctl start anomaly-api
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref AppInstance
+      AllocationId: !GetAtt ElasticIp.AllocationId
+
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: ElasticIpAssociation
+    Properties:
+      TopicArn: !Ref SnsTopic
+      Protocol: http # given 
+      Endpoint: !Sub http://${ElasticIp}:8000/notify # endpoint e.g. http://<Elastic-IP>:8000/notify
+
+Outputs:
+  InstanceId:
+    Value: !Ref AppInstance
+
+  ElasticIP:
+    Value: !Ref ElasticIp
+
+  BucketName:
+    Value: !Ref DataBucket
+
+  TopicArn:
+    Value: !Ref SnsTopic
+
+  ApiUrl:
+    Value: !Sub http://${ElasticIp}:8000/docs
+
+  NotifyUrl:
+    Value: !Sub http://${ElasticIp}:8000/notify
