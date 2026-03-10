@@ -18,7 +18,7 @@ Parameters:
 
   SubnetId:
     Type: AWS::EC2::Subnet::Id
-    Description: The Public Subnet where the EC2 instance will launch
+    Description: The Public Subnet where the EC2 Instance will launch
 
   RepoUrl:
     Type: String
@@ -39,7 +39,7 @@ Resources:
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow SSH and FastAPI
+      GroupDescription: Allow SSH and FastAPI access
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -58,7 +58,7 @@ Resources:
 
   DataBucket:
     Type: AWS::S3::Bucket
-    DependsOn: SnsTopicPolicy # REMOVE DEPENDENCY HERE 
+    DependsOn: SnsTopicPolicy # REMOVE DEPENDENCY HERE / LATER BROUGHT BACK
     Properties:
       BucketName: !Sub ${UvaId}-ds5220-dp1-${AWS::AccountId}-${AWS::Region}
       NotificationConfiguration:

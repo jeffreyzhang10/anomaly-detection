@@ -73,7 +73,7 @@ async def handle_sns(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ok"}
     
     except Exception:
-        logger.exception("Error processing SNS notification")
+        logger.exception("Error Processing SNS notification")
         return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to process SNS notification"},)
 
 

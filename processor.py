@@ -67,7 +67,7 @@ def process_file(bucket: str, key: str):
 
         # 6. Save updated baseline back to S3
         baseline_mgr.save(baseline)
-        logger.info("Saved updated baseline.")
+        logger.info("Saved updated baseline")
 
         # Upload log to S3 
 
