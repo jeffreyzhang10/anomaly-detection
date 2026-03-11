@@ -116,7 +116,7 @@ Resources:
   SnsTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub ${UvaId}-ds5220-dp1
+      TopicName: ds5220-dp1
 
   SnsTopicPolicy:
     Type: AWS::SNS::TopicPolicy
